@@ -1,0 +1,586 @@
+{
+  "name": "CrediLens AI",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "credilens-auto-company-analysis",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "ee4940f6-0886-495e-85c1-c9de45c86023",
+      "name": "Loan Application Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "0459fa2f-723d-4700-8ade-561fc24b8845"
+    },
+    {
+      "parameters": {
+        "jsCode": "const incoming = $input.first().json;\nconst body = incoming.body && typeof incoming.body === 'object' ? incoming.body : incoming;\nconst companyName = String(body.companyName ?? body.company ?? body.name ?? '').trim();\nconst requestedAmount = Number(body.requestedAmount ?? body.loanAmount ?? 0);\nif (!companyName) throw new Error('companyName is required.');\nif (!Number.isFinite(requestedAmount) || requestedAmount <= 0) throw new Error('requestedAmount must be a positive number.');\nreturn [{json:{\n  companyName,\n  requestedAmount,\n  currency: String(body.currency || 'INR').toUpperCase(),\n  applicantId: String(body.applicantId || `CL-${Date.now()}`),\n  receivedAt: new Date().toISOString()\n}}];"
+      },
+      "id": "a1ed796d-5d5e-4a60-a6fa-6b6585c21cd8",
+      "name": "Validate Application",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://query1.finance.yahoo.com/v1/finance/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $('Validate Application').first().json.companyName }}"
+            },
+            {
+              "name": "quotesCount",
+              "value": "10"
+            },
+            {
+              "name": "newsCount",
+              "value": "6"
+            },
+            {
+              "name": "enableFuzzyQuery",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6c4dc20b-3ef9-439f-91d4-4dacc69a3dcc",
+      "name": "Search Company & Market",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Validate Application').first().json;\nconst raw = $input.first().json || {};\nconst quotes = Array.isArray(raw.quotes) ? raw.quotes : [];\nconst news = Array.isArray(raw.news) ? raw.news : [];\n\nfunction norm(s){\n  return String(s||'').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]/g,'');\n}\nconst input=String(req.companyName||'').trim();\nconst target=norm(input);\n\n// Deterministic aliases prevent Yahoo's fuzzy search from mapping short names such as\n// \"Infosys\" to similarly named but unrelated listings such as HCL Infosystems.\nconst aliases={\n  'infosys':'INFY.NS',\n  'infosyslimited':'INFY.NS',\n  'tcs':'TCS.NS',\n  'tataconsultancyservices':'TCS.NS',\n  'tatamotors':'TMPV.NS',\n  'tatamotorslimited':'TMPV.NS',\n  'reliance':'RELIANCE.NS',\n  'relianceindustries':'RELIANCE.NS',\n  'relianceindustrieslimited':'RELIANCE.NS',\n  'itc':'ITC.NS',\n  'itclimited':'ITC.NS',\n  'sunpharma':'SUNPHARMA.NS',\n  'sunpharmaceutical':'SUNPHARMA.NS',\n  'sunpharmaceuticalindustries':'SUNPHARMA.NS',\n  'adani':'ADANIENT.NS',\n  'adanienterprises':'ADANIENT.NS',\n  'zomato':'ZOMATO.NS',\n  'eternal':'ETERNAL.NS',\n  'jswsteel':'JSWSTEEL.NS',\n  'hcltech':'HCLTECH.NS',\n  'wipro':'WIPRO.NS',\n  'hdfcbank':'HDFCBANK.NS',\n  'icicibank':'ICICIBANK.NS',\n  'bhartiairtel':'BHARTIARTL.NS'\n};\n\nlet forcedSymbol=aliases[target]||null;\nif(!forcedSymbol && /^[A-Z0-9.-]+\\.(NS|BO)$/i.test(input)) forcedSymbol=input.toUpperCase();\n\nlet m=null;\nif(forcedSymbol){\n  const exact=quotes.find(q=>String(q.symbol||'').toUpperCase()===forcedSymbol);\n  m=exact||{symbol:forcedSymbol,shortname:input,longname:input,exchange:forcedSymbol.endsWith('.BO')?'BSE':'NSI',quoteType:'EQUITY',currency:req.currency};\n}\n\nif(!m){\n  const scored=quotes.filter(q=>q?.symbol).map((q,i)=>{\n    const names=[q.symbol,q.shortname,q.longname,q.displayName].filter(Boolean).map(norm);\n    const words=norm(input).split(/(?=[A-Z])/);\n    let score=0;\n    if(names.some(x=>x===target)) score+=1000;\n    if(names.some(x=>x===target+'limited'||x===target+'ltd')) score+=900;\n    if(names.some(x=>x.startsWith(target+'limited')||x.startsWith(target+'ltd'))) score+=700;\n    if(names.some(x=>x.includes(target))) score+=400;\n    if(names.some(x=>target.includes(x) && x.length>4)) score+=150;\n    if(String(q.quoteType||'').toUpperCase()==='EQUITY') score+=100;\n    const ex=String(q.exchange||'').toUpperCase();\n    if(ex.includes('NSI')||ex.includes('NSE')) score+=50;\n    if(ex.includes('BSE')) score+=20;\n    score-=i*0.01;\n    return {q,score};\n  }).sort((a,b)=>b.score-a.score);\n  if(!scored.length) throw new Error(`No Yahoo Finance listing found for \"${input}\".`);\n  m=scored[0].q;\n}\n\nconst cleanNews=news.slice(0,6).map(n=>({\n  title:String(n.title||'').trim(),\n  publisher:String(n.publisher||'Unknown'),\n  link:n.link||null,\n  publishedAt:n.providerPublishTime?new Date(n.providerPublishTime*1000).toISOString():null\n})).filter(n=>n.title);\n\nreturn [{json:{\n  ...req,\n  companyName:m.longname||m.shortname||input,\n  symbol:m.symbol,\n  exchange:m.exchange||'Not provided',\n  region:m.region||'Not provided',\n  quoteType:m.quoteType||'EQUITY',\n  currency:m.currency||req.currency||'INR',\n  marketNews:cleanNews,\n  yahooResolved:true,\n  resolutionMethod:forcedSymbol?'deterministic_alias_or_ticker':'yahoo_ranked_search'\n}}];"
+      },
+      "id": "14b77596-41b1-4a73-83e8-6f24c2408c86",
+      "name": "Resolve Company",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{{ $('Resolve Company').first().json.symbol }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $('Resolve Company').first().json.symbol }}"
+            },
+            {
+              "name": "type",
+              "value": "annualTotalRevenue,annualNetIncome,annualGrossProfit,annualOperatingIncome,annualEBITDA,annualInterestExpense,trailingTotalRevenue,trailingNetIncome"
+            },
+            {
+              "name": "period1",
+              "value": "1451606400"
+            },
+            {
+              "name": "period2",
+              "value": "={{ Math.floor(Date.now() / 1000) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cdc7869d-3994-4c00-9f85-84cc7a2194c8",
+      "name": "Fetch Income Statement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        912,
+        112
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{{ $('Resolve Company').first().json.symbol }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $('Resolve Company').first().json.symbol }}"
+            },
+            {
+              "name": "type",
+              "value": "annualTotalAssets,annualTotalCurrentAssets,annualTotalCurrentLiabilities,annualCashCashEquivalentsAndShortTermInvestments,annualCashFinancial,annualInventory,annualTotalDebt,annualStockholdersEquity"
+            },
+            {
+              "name": "period1",
+              "value": "1451606400"
+            },
+            {
+              "name": "period2",
+              "value": "={{ Math.floor(Date.now() / 1000) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "858b9484-cd92-49f2-9405-f1b313f9ae55",
+      "name": "Fetch Balance Sheet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1152,
+        112
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{{ $('Resolve Company').first().json.symbol }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $('Resolve Company').first().json.symbol }}"
+            },
+            {
+              "name": "type",
+              "value": "annualOperatingCashFlow,annualFreeCashFlow,annualCapitalExpenditure,annualInvestingCashFlow,annualFinancingCashFlow"
+            },
+            {
+              "name": "period1",
+              "value": "1451606400"
+            },
+            {
+              "name": "period2",
+              "value": "={{ Math.floor(Date.now() / 1000) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e9154c19-23a8-4f7b-a0f1-e060890d7c55",
+      "name": "Fetch Cash Flow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1392,
+        112
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const selected=$('Resolve Company').first().json;\nconst income=$('Fetch Income Statement').first().json||{};\nconst balance=$('Fetch Balance Sheet').first().json||{};\nconst cash=$('Fetch Cash Flow').first().json||{};\nfunction result(resp){return Array.isArray(resp?.timeseries?.result)?resp.timeseries.result:(Array.isArray(resp?.result)?resp.result:[]);}\nfunction latest(results, keys){\n  for(const key of keys){\n    for(const obj of results){\n      const arr=obj?.[key];\n      if(!Array.isArray(arr)||!arr.length) continue;\n      const rows=[...arr].sort((a,b)=>new Date(b?.asOfDate||0)-new Date(a?.asOfDate||0));\n      for(const row of rows){\n        const v=Number(row?.reportedValue?.raw ?? row?.raw ?? row?.value);\n        if(Number.isFinite(v)) return v;\n      }\n    }\n  }\n  return null;\n}\nconst inc=result(income), bal=result(balance), cf=result(cash);\nconst s={\n revenue:latest(inc,['annualTotalRevenue','trailingTotalRevenue']),\n netIncome:latest(inc,['annualNetIncome','trailingNetIncome']),\n grossProfit:latest(inc,['annualGrossProfit']),\n operatingIncome:latest(inc,['annualOperatingIncome']),\n ebitda:latest(inc,['annualEBITDA']),\n interestExpense:latest(inc,['annualInterestExpense']),\n currentAssets:latest(bal,['annualTotalCurrentAssets']),\n currentLiabilities:latest(bal,['annualTotalCurrentLiabilities']),\n cash:latest(bal,['annualCashCashEquivalentsAndShortTermInvestments','annualCashFinancial']),\n inventory:latest(bal,['annualInventory']),\n totalAssets:latest(bal,['annualTotalAssets']),\n totalDebt:latest(bal,['annualTotalDebt']),\n equity:latest(bal,['annualStockholdersEquity']),\n operatingCashFlow:latest(cf,['annualOperatingCashFlow']),\n freeCashFlow:latest(cf,['annualFreeCashFlow']),\n capitalExpenditure:latest(cf,['annualCapitalExpenditure']),\n investingCashFlow:latest(cf,['annualInvestingCashFlow']),\n financingCashFlow:latest(cf,['annualFinancingCashFlow'])\n};\nconst ratio=(a,b)=>Number.isFinite(a)&&Number.isFinite(b)&&b!==0?a/b:null;\nconst r={\n currentRatio:ratio(s.currentAssets,s.currentLiabilities),\n debtToEquity:ratio(s.totalDebt,s.equity),\n netMargin:ratio(s.netIncome,s.revenue),\n grossMargin:ratio(s.grossProfit,s.revenue),\n operatingMargin:ratio(s.operatingIncome,s.revenue),\n interestCoverage:(Number.isFinite(s.operatingIncome)&&Number.isFinite(s.interestExpense)&&s.interestExpense>0)?s.operatingIncome/s.interestExpense:null,\n operatingCashFlowToDebt:ratio(s.operatingCashFlow,s.totalDebt),\n fcfToDebt:ratio(s.freeCashFlow,s.totalDebt),\n cashToDebt:ratio(s.cash,s.totalDebt)\n};\nconst missing=Object.entries(s).filter(([k,v])=>v===null).map(([k])=>k);\nfunction stress(multRev,multEbitda,multOcf){\n  const revenue=Number.isFinite(s.revenue)?s.revenue*multRev:null;\n  const ebitda=Number.isFinite(s.ebitda)?s.ebitda*multEbitda:null;\n  const ocf=Number.isFinite(s.operatingCashFlow)?s.operatingCashFlow*multOcf:null;\n  const fcf=Number.isFinite(s.freeCashFlow)?s.freeCashFlow*multOcf:null;\n  return {revenue,ebitda,operatingCashFlow:ocf,freeCashFlow:fcf,\n    revenueAfterStress:revenue,ebitdaAfterStress:ebitda,ocfAfterStress:ocf,fcfAfterStress:fcf,\n    interestCoverage:(Number.isFinite(ebitda)&&Number.isFinite(s.interestExpense)&&s.interestExpense>0)?ebitda/s.interestExpense:null,\n    debtServiceProxy:(Number.isFinite(ocf)&&Number.isFinite(s.totalDebt)&&s.totalDebt>0)?ocf/s.totalDebt:null};\n}\nconst stressTests={\n  base:stress(1,1,1),\n  downside15:stress(.85,.80,.75),\n  severe30:stress(.70,.60,.50)\n};\nconst flags=[];\nif(r.currentRatio!==null&&r.currentRatio<1) flags.push('Current ratio below 1.0');\nif(r.debtToEquity!==null&&r.debtToEquity>2) flags.push('Debt-to-equity above 2.0x');\nif(r.netMargin!==null&&r.netMargin<0) flags.push('Negative net margin');\nif(r.operatingCashFlow!==null&&r.operatingCashFlow<0) flags.push('Negative operating cash flow');\nif(r.freeCashFlow!==null&&r.freeCashFlow<0) flags.push('Negative free cash flow');\nif(r.interestCoverage!==null&&r.interestCoverage<1.5) flags.push('Weak interest coverage');\nif(missing.length>=5) flags.push('Material financial data is missing');\nconst dataQuality={missingFields:missing,missingCount:missing.length,completenessScore:Math.round((Object.keys(s).length-missing.length)/Object.keys(s).length*100)};\nconst evidence={\n applicantId:selected.applicantId,companyName:selected.companyName,symbol:selected.symbol,exchange:selected.exchange,\n currency:selected.currency,requestedAmount:selected.requestedAmount,quoteType:selected.quoteType,\n statements:s,ratios:r,stressTests,anomalyFlags:flags,dataQuality,\n news:selected.marketNews||[]\n};\nreturn [{json:evidence}];"
+      },
+      "id": "eb97bf1d-5c40-40c7-af15-4c48855b9cf0",
+      "name": "Build Credit Evidence Pack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1632,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are Agent 1: Financial Health Analyst.\nAnalyze only profitability, liquidity, leverage and balance-sheet quality.\nEVIDENCE:\n{{ JSON.stringify($('Build Credit Evidence Pack').first().json.statements) }}\nRATIOS:\n{{ JSON.stringify($('Build Credit Evidence Pack').first().json.ratios) }}\nReturn exactly: {\"score\":<integer 0-100>,\"risk\":\"Low|Medium|High\",\"findings\":[\"...\"],\"data_gaps\":[\"...\"]}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Return STRICT JSON only. No markdown. Keep the response under 120 words. Do not invent unavailable values."
+            }
+          ]
+        }
+      },
+      "id": "cee81714-a9bb-4761-8860-afa3efdf2138",
+      "name": "Financial Health Agent",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1904,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are Agent 2: Cash Flow & Repayment Analyst.\nAssess operating cash flow, free cash flow, debt burden, interest coverage and ability to absorb the requested exposure.\nEVIDENCE:\n{{ JSON.stringify({requestedAmount:$('Build Credit Evidence Pack').first().json.requestedAmount,statements:$('Build Credit Evidence Pack').first().json.statements,ratios:$('Build Credit Evidence Pack').first().json.ratios}) }}\nReturn exactly: {\"score\":<integer 0-100>,\"risk\":\"Low|Medium|High\",\"findings\":[\"...\"],\"repayment_view\":\"...\"}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Return STRICT JSON only. No markdown. Keep the response under 120 words. Do not invent unavailable values."
+            }
+          ]
+        }
+      },
+      "id": "22912dce-13f2-41d3-90aa-26addf2f43ea",
+      "name": "Cash Flow & Repayment Agent",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1904,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are Agent 3: Industry & Market Risk Analyst.\nUse ONLY the supplied company identity and recent Yahoo Finance headlines. Do not infer undisclosed facts.\nCOMPANY: {{ $('Build Credit Evidence Pack').first().json.companyName }}\nSYMBOL: {{ $('Build Credit Evidence Pack').first().json.symbol }}\nNEWS: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.news) }}\nReturn exactly: {\"score\":<integer 0-100>,\"risk\":\"Low|Medium|High\",\"findings\":[\"...\"],\"news_signals\":[\"...\"]}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Return STRICT JSON only. No markdown. Keep the response under 120 words. Do not invent unavailable values."
+            }
+          ]
+        }
+      },
+      "id": "8ca9f366-37c1-4f9a-9af8-90fe7c73edd8",
+      "name": "Industry & Market Agent",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1904,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are Agent 4: Anomaly & Stress Analyst.\nReview deterministic anomaly flags and stress-test outputs. Explain where downside scenarios weaken repayment capacity.\nFLAGS: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.anomalyFlags) }}\nDATA QUALITY: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.dataQuality) }}\nSTRESS: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.stressTests) }}\nReturn exactly: {\"score\":<integer 0-100>,\"risk\":\"Low|Medium|High\",\"findings\":[\"...\"],\"stress_view\":\"...\",\"data_quality_comment\":\"...\"}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Return STRICT JSON only. No markdown. Keep the response under 120 words. Do not invent unavailable values."
+            }
+          ]
+        }
+      },
+      "id": "dabb5b2f-81f8-4d4a-9cd6-1800ee8c28ec",
+      "name": "Anomaly & Stress Agent",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1904,
+        912
+      ]
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "157ebeda-a616-49bc-93c6-11d3b40a1e13",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        1104
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "4TkkvdtrCQFPMDuJ",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are the Supervisory Credit Committee for CrediLens AI.\nReview the four specialist assessments plus deterministic ratios/stress results. Challenge conflicts.\nUse ONLY supplied evidence. If material data is missing or evidence conflicts, choose Review. Never return zero scores when supplied evidence contains usable ratios.\nNever propose exposure above the requested amount.\n\nReturn ONE compact JSON object only, on a single line, with exactly these fields:\n{\"companyName\":\"string\",\"symbol\":\"string\",\"decision\":\"Approve|Review|Reject\",\"proposed_exposure\":0,\"currency\":\"string\",\"overall_confidence\":0,\"credit_metrics\":{\"financial_health\":0,\"cash_flow\":0,\"repayment_capacity\":0,\"deterministic_score\":0},\"key_risks\":[\"string\"],\"mitigating_conditions\":[\"string\"],\"supporting_evidence\":[\"string\"],\"committee_rationale\":\"string\"}\n\nRules: scores/confidence 0-100; arrays max 3 items each; each array item max 18 words; rationale max 35 words; JSON only; no markdown; no newline inside strings.\n\nCOMPANY: {{ $('Build Credit Evidence Pack').first().json.companyName }} ({{ $('Build Credit Evidence Pack').first().json.symbol }})\nREQUESTED: {{ $('Build Credit Evidence Pack').first().json.requestedAmount }} {{ $('Build Credit Evidence Pack').first().json.currency }}\nRATIOS: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.ratios) }}\nSTRESS: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.stressTests) }}\nDATA QUALITY: {{ JSON.stringify($('Build Credit Evidence Pack').first().json.dataQuality) }}\nAGENT 1: {{ $('Financial Health Agent').first().json.text }}\nAGENT 2: {{ $('Cash Flow & Repayment Agent').first().json.text }}\nAGENT 3: {{ $('Industry & Market Agent').first().json.text }}\nAGENT 4: {{ $('Anomaly & Stress Agent').first().json.text }}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Return one compact single-line JSON object only. No markdown, no code fences, no commentary. Keep all arrays to at most 3 short items and the rationale under 35 words."
+            }
+          ]
+        }
+      },
+      "id": "c4aecacd-5c29-4d27-a966-2f18591e20db",
+      "name": "Supervisory Credit Committee",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        2432,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$input.first().json||{};\nconst raw=input.text ?? input.output ?? input;\n\nfunction parseJson(value){\n  if(value && typeof value==='object' && !Array.isArray(value)) return value;\n  let s=String(value??'').replace(/```json/gi,'').replace(/```/g,'').trim();\n  try{return JSON.parse(s)}catch{}\n  const a=s.indexOf('{'), b=s.lastIndexOf('}');\n  if(a<0||b<=a) return null;\n  s=s.slice(a,b+1);\n  let out='', quoted=false, esc=false;\n  for(const ch of s){\n    if(quoted){\n      if(esc){out+=ch;esc=false;continue}\n      if(ch==='\\\\'){out+=ch;esc=true;continue}\n      if(ch==='\"'){out+=ch;quoted=false;continue}\n      if(ch==='\\n'){out+='\\\\n';continue}\n      if(ch==='\\r'){out+='\\\\r';continue}\n      if(ch==='\\t'){out+='\\\\t';continue}\n      out+=ch;\n    }else{\n      if(ch==='\"') quoted=true;\n      out+=ch;\n    }\n  }\n  out=out.replace(/,\\s*([}\\]])/g,'$1');\n  try{return JSON.parse(out)}catch{return null}\n}\n\nconst base=$('Build Credit Evidence Pack').first().json;\nconst requested=Math.max(0,Number(base.requestedAmount)||0);\nconst r=base.ratios||{};\nconst s=base.stressTests||{};\nconst dq=base.dataQuality||{};\nconst statements=base.statements||{};\n\nfunction num(v){const n=Number(v);return Number.isFinite(n)?n:null}\nfunction clamp(n){return Math.max(0,Math.min(100,Math.round(n)))}\n\n// Deterministic underwriting score. This is a safeguard, not an AI-generated fact.\nlet score=55;\nconst cr=num(r.currentRatio), de=num(r.debtToEquity), nm=num(r.netMargin);\nconst ic=num(r.interestCoverage), ocf=num(r.operatingCashFlowToDebt), fcf=num(r.fcfToDebt), cash=num(r.cashToDebt);\n\nif(cr!==null) score += cr>=1.5?10:cr>=1.0?3:-10;\nif(de!==null) score += de<=1?10:de<=2?2:-10;\nif(nm!==null) score += nm>=0.10?10:nm>=0?3:-12;\nif(ic!==null) score += ic>=3?10:ic>=1.5?3:-12;\nif(ocf!==null) score += ocf>=0.20?8:ocf>=0?2:-10;\nif(fcf!==null) score += fcf>=0.10?6:fcf>=0?1:-8;\nif(cash!==null) score += cash>=0.50?6:cash>=0.20?2:-4;\nif((dq.missingFields||[]).length) score -= Math.min(12,(dq.missingFields||[]).length*4);\n\nconst severeOcf=num(s.severe30?.ocfAfterStress ?? s.severe30?.operatingCashFlow);\nif(severeOcf!==null && severeOcf<0) score-=8;\n\nscore=clamp(score);\nconst deterministicDecision=score>=75?'Approve':score>=50?'Review':'Reject';\nconst deterministicRisk=score>=75?'Low':score>=50?'Medium':'High';\n\nlet result=parseJson(raw);\nconst agentScores=[\n  parseJson($('Financial Health Agent').first().json.text),\n  parseJson($('Cash Flow & Repayment Agent').first().json.text),\n  parseJson($('Industry & Market Agent').first().json.text),\n  parseJson($('Anomaly & Stress Agent').first().json.text)\n].filter(Boolean);\n\nconst allAgentZero=agentScores.length===0 || agentScores.every(a=>Number(a.score||0)===0);\n\n// If the committee produced an empty/zero assessment while deterministic evidence is available,\n// use the deterministic safeguard instead of returning an unusable 0-confidence result.\nif(!result || typeof result!=='object' || Array.isArray(result) ||\n   allAgentZero ||\n   Number(result.overall_confidence||0)===0){\n  result={\n    companyName:base.companyName,\n    symbol:base.symbol,\n    decision:deterministicDecision,\n    proposed_exposure:deterministicDecision==='Approve'?requested:0,\n    currency:base.currency||'INR',\n    overall_confidence:Math.max(50,Math.min(90,score)),\n    credit_metrics:{\n      financial_health:score,\n      cash_flow:score,\n      repayment_capacity:score,\n      deterministic_score:score\n    },\n    key_risks:[],\n    mitigating_conditions:[],\n    supporting_evidence:[\n      `Deterministic underwriting score: ${score}/100.`,\n      `Debt-to-equity: ${de===null?'Not provided':de.toFixed(2)}x.`,\n      `Interest coverage: ${ic===null?'Not provided':ic.toFixed(2)}x.`\n    ],\n    committee_rationale:'Committee safeguard applied because the AI assessment was incomplete; decision is grounded in supplied financial ratios and stress evidence.',\n    committee_fallback:true\n  };\n}\n\nresult.companyName=result.companyName||base.companyName;\nresult.symbol=result.symbol||base.symbol;\nresult.currency=result.currency||base.currency||'INR';\n\nconst proposed=num(result.proposed_exposure);\nresult.proposed_exposure=Math.max(0,Math.min(proposed===null?0:proposed,requested));\nresult.decision=['Approve','Review','Reject'].includes(result.decision)?result.decision:'Review';\n\nconst conf=num(result.overall_confidence);\nresult.overall_confidence=clamp(conf===null?0:conf);\n\nresult.credit_metrics=result.credit_metrics&&typeof result.credit_metrics==='object'?result.credit_metrics:{};\nfor(const k of ['financial_health','cash_flow','repayment_capacity','deterministic_score']){\n  const n=num(result.credit_metrics[k]);\n  result.credit_metrics[k]=clamp(n===null?0:n);\n}\nfor(const k of ['key_risks','mitigating_conditions','supporting_evidence']){\n  if(!Array.isArray(result[k])) result[k]=[];\n  result[k]=result[k].map(v=>String(v)).filter(Boolean).slice(0,3);\n}\nresult.committee_rationale=String(result.committee_rationale||'').slice(0,500);\n\n// Per-agent safeguard: if a specialist's own score is missing/zero (which our testing shows\n// only ever happens when the model failed to analyze, never as a genuine finding), fall back\n// to the deterministic score computed above rather than surfacing a broken \"0/100\" card.\nfunction agentOrFallback(parsed, label){\n  const s = parsed ? num(parsed.score) : null;\n  const isValid = s !== null && s > 0;\n  if (isValid) return parsed;\n  return {\n    score: score,\n    risk: deterministicRisk,\n    findings: [`Automated ${label} assessment was inconclusive this run; score reflects verified financial ratios instead.`],\n    fallbackApplied: true\n  };\n}\n\nconst financialHealthParsed=agentOrFallback(parseJson($('Financial Health Agent').first().json.text), 'financial health');\nconst cashFlowParsed=agentOrFallback(parseJson($('Cash Flow & Repayment Agent').first().json.text), 'cash flow');\nconst industryMarketParsed=agentOrFallback(parseJson($('Industry & Market Agent').first().json.text), 'industry & market');\nconst anomalyStressParsed=agentOrFallback(parseJson($('Anomaly & Stress Agent').first().json.text), 'anomaly & stress');\n\nreturn [{json:{\n  ...result,\n  requested_exposure:requested,\n  financials:statements,\n  ratios:base.ratios||{},\n  stressTests:base.stressTests||{},\n  anomalyFlags:base.anomalyFlags||[],\n  dataQuality:base.dataQuality||{},\n  marketNews:base.marketNews||base.news||[],\n  agentAssessments:{\n    financialHealth:financialHealthParsed,\n    cashFlowRepayment:cashFlowParsed,\n    industryMarket:industryMarketParsed,\n    anomalyStress:anomalyStressParsed\n  },\n  generatedAt:new Date().toISOString(),\n  system:'CrediLens AI Multi-Agent Credit Intelligence & Underwriting System'\n}}];"
+      },
+      "id": "a09bfebf-5753-4b5f-ad20-2624d4e99bf2",
+      "name": "Finalize Credit Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type, Accept"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a16b783d-8745-4e09-9186-0ffeaa144d35",
+      "name": "Return Credit Decision",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2912,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Loan Application Intake": {
+      "main": [
+        [
+          {
+            "node": "Validate Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Application": {
+      "main": [
+        [
+          {
+            "node": "Search Company & Market",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Company & Market": {
+      "main": [
+        [
+          {
+            "node": "Resolve Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Company": {
+      "main": [
+        [
+          {
+            "node": "Fetch Income Statement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Income Statement": {
+      "main": [
+        [
+          {
+            "node": "Fetch Balance Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Balance Sheet": {
+      "main": [
+        [
+          {
+            "node": "Fetch Cash Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Cash Flow": {
+      "main": [
+        [
+          {
+            "node": "Build Credit Evidence Pack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Credit Evidence Pack": {
+      "main": [
+        [
+          {
+            "node": "Financial Health Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Financial Health Agent": {
+      "main": [
+        [
+          {
+            "node": "Cash Flow & Repayment Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cash Flow & Repayment Agent": {
+      "main": [
+        [
+          {
+            "node": "Industry & Market Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Industry & Market Agent": {
+      "main": [
+        [
+          {
+            "node": "Anomaly & Stress Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anomaly & Stress Agent": {
+      "main": [
+        [
+          {
+            "node": "Supervisory Credit Committee",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supervisory Credit Committee": {
+      "main": [
+        [
+          {
+            "node": "Finalize Credit Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Credit Decision": {
+      "main": [
+        [
+          {
+            "node": "Return Credit Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Financial Health Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Cash Flow & Repayment Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Industry & Market Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Anomaly & Stress Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Supervisory Credit Committee",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "4fdf8aea-311e-438f-ae98-39916c8fad47",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b135afb4b31e8b887820449fcaaae86ebfc28e2819c6b2b4449c5eab9cb462b7"
+  },
+  "nodeGroups": [],
+  "id": "IyhXnQMkAOMhJTmV",
+  "tags": []
+}

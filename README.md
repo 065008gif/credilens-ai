@@ -12,7 +12,7 @@ Manual credit underwriting is slow and inconsistent — analysts pull financials
 
 ## What it does
 
-1. **Company resolution & data ingestion** — resolves a company name/ticker and pulls live income statement, balance sheet, and cash flow data from Yahoo Finance
+1. **Company resolution & data ingestion** :- resolves a company name/ticker and pulls live income statement, balance sheet, and cash flow data from Yahoo Finance
 2. **Ratio analysis & stress testing** :- computes standard credit ratios (debt-to-equity, interest coverage, cash-to-debt, etc.) and stress-tests them across three scenarios: Base, 15% Downside, and 30% Severe Downside
 3. **Specialist risk assessment** :- four independent analytical passes evaluate the company from different angles: Financial Health, Cash Flow & Repayment, Industry & Market, and Anomaly & Stress detection
 4. **Committee decision synthesis** :- a final review step combines all four assessments into one Approve / Review / Reject recommendation with a confidence score and written rationale

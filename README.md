@@ -1,4 +1,4 @@
-# CrediLens AI — Automated Credit Underwriting Engine
+# CrediLens AI - Automated Credit Underwriting Engine
 
 **Turns public financial data into a defensible credit decision in minutes, not hours.**
 
@@ -20,13 +20,13 @@ Manual credit underwriting is slow and inconsistent — analysts pull financials
 
 ## Example output
 
-**Decision summary** — final call, confidence score, and category-level breakdown:
+**Decision summary** - final call, confidence score, and category-level breakdown:
 ![Decision summary](docs/screenshots/CrediLens_decision_summary.png)
 
-**Credit rationale** — the reasoning behind the decision, backed by actual computed ratios (debt-to-equity, interest coverage, margins) rather than a black-box score:
+**Credit rationale** - the reasoning behind the decision, backed by actual computed ratios (debt-to-equity, interest coverage, margins) rather than a black-box score:
 ![Credit rationale](docs/screenshots/CrediLens_credit_rationale.png)
 
-**Stress testing & specialist scores** — resilience under adverse scenarios, plus the four independent risk assessments with severity flags:
+**Stress testing & specialist scores** - resilience under adverse scenarios, plus the four independent risk assessments with severity flags:
 ![Stress test and specialist scores](docs/screenshots/CrediLens_stress_test_&_recent_news.png)
 
 ## Architecture
